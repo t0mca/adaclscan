@@ -17,6 +17,24 @@ namespace adaclscan
         static Dictionary<string, string> mapSid_DN = new Dictionary<string, string>();
         static Dictionary<string, string> mapDN_Path = new Dictionary<string, string>();
         static Dictionary<string, ActiveDirectorySecurity> mapDN_Sd = new Dictionary<string, ActiveDirectorySecurity>();
+        static StreamWriter sw_aclresult = null;
+
+        static void WriteLog(string info)
+        {
+            Console.WriteLine(info);
+            if (sw_aclresult != null)
+            {
+                sw_aclresult.WriteLine(info);
+            }
+        }
+
+        static long ConvertDateTimeToInt(DateTime time)
+        {
+            DateTime startTime = TimeZone.CurrentTimeZone.ToLocalTime(new DateTime(1970, 1, 1, 0, 0, 0, 0));
+            long t = (time.Ticks - startTime.Ticks) / 10000000;  
+            return t;
+        }
+
         static void Main(string[] args)
         {
             if (args.Length != 4)
@@ -36,7 +54,8 @@ namespace adaclscan
                 myfilter += ")";
                 DirectorySearcher searcher = Ldapcoon.getSearch(Domain, DomainController, false, false);
                 SearchResultCollection result = Ldapcoon.LdapSearchAll(myfilter);
-                StreamWriter sw = new StreamWriter("map_sid_dn.txt");
+                StreamWriter sw_sidmap = new StreamWriter("map_sid_dn.txt");
+                sw_aclresult = new StreamWriter(string.Format("acl_result_{0}.txt", ConvertDateTimeToInt(DateTime.Now)));
                 foreach (SearchResult r in result)
                 {
                     string sid = "";
@@ -55,7 +74,7 @@ namespace adaclscan
                         SecurityIdentifier sido = new SecurityIdentifier(r.Properties["objectSid"][0] as byte[], 0);
                         sid = sido.Value.ToString();
                         mapSid_DN[sid] = distinguishedName;
-                        sw.WriteLine(sid + " " + distinguishedName);
+                        sw_sidmap.WriteLine(sid + " " + distinguishedName);
                     }                    
                     if (r.Properties.Contains("adspath"))
                     {
@@ -70,14 +89,17 @@ namespace adaclscan
                         mapDN_Sd[distinguishedName] = sd;
                     }
                 }
-                sw.Close();
+                sw_sidmap.Close();
                 //通过映射取输出
                 foreach (KeyValuePair<string, ActiveDirectorySecurity> kv in mapDN_Sd)
                 {
-                    Console.WriteLine(kv.Key);
+                    WriteLog(kv.Key);
                     PrintAllowPermissions(kv.Value);
-                    Console.WriteLine();
+                    WriteLog("");
                 }
+                sw_sidmap.Close();
+                sw_aclresult.Close();
+                sw_aclresult = null;
             });
 
         }
@@ -179,41 +201,41 @@ namespace adaclscan
 
             if (fullControlPrincipals.Count > 0)
             {
-                Console.WriteLine("  GenericAll Principals    :");
-                fullControlPrincipals.OrderBy(p => p).ToList().ForEach(p => {                       
-                        Console.WriteLine("    " + p);
+                WriteLog("  GenericAll Principals    :");
+                fullControlPrincipals.OrderBy(p => p).ToList().ForEach(p => {
+                    WriteLog("    " + p);
                 });
             }
 
             if (writeOwnerPrincipals.Count > 0)
             {
-                Console.WriteLine("  WriteOwner Principals    :");
+                WriteLog("  WriteOwner Principals    :");
                 writeOwnerPrincipals.OrderBy(p => p).ToList().ForEach(p => {
-                    Console.WriteLine("    " + p);
+                    WriteLog("    " + p);
                 });
             }
 
             if (writeDaclPrincipals.Count > 0)
             {
-                Console.WriteLine("  WriteDacl Principals     :");
+                WriteLog("  WriteDacl Principals     :");
                 writeDaclPrincipals.OrderBy(p => p).ToList().ForEach(p => {
-                    Console.WriteLine("    " + p);
+                    WriteLog("    " + p);
                 });
             }
 
             if (writePropertyPrincipals.Count > 0)
             {
-                Console.WriteLine("  WriteProperty Principals :");
+                WriteLog("  WriteProperty Principals :");
                 writePropertyPrincipals.OrderBy(p => p).ToList().ForEach(p => {
-                    Console.WriteLine("    " + p);
+                    WriteLog("    " + p);
                 });
             }
 
             if (writePropertyPrincipals.Count > 0)
             {
-                Console.WriteLine("  GenericWrite Principals  :");
+                WriteLog("  GenericWrite Principals  :");
                 writePropertyPrincipals.OrderBy(p => p).ToList().ForEach(p => {
-                    Console.WriteLine("    " + p);
+                    WriteLog("    " + p);
                 });
             }
 
