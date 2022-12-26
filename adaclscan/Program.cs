@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Collections;
+using System.Security.Cryptography;
 
 namespace adaclscan
 {
@@ -16,15 +17,15 @@ namespace adaclscan
     {
         static Dictionary<string, string> mapSid_DN = new Dictionary<string, string>();
         static Dictionary<string, string> mapDN_Path = new Dictionary<string, string>();
-        static Dictionary<string, ActiveDirectorySecurity> mapDN_Sd = new Dictionary<string, ActiveDirectorySecurity>();
-        static StreamWriter sw_aclresult = null;
+        static StreamWriter swTempAclResult = null;
+        static string tempResultPath = "";
 
         static void WriteLog(string info)
         {
-            Console.WriteLine(info);
-            if (sw_aclresult != null)
+            //Console.WriteLine(info);
+            if (swTempAclResult != null)
             {
-                sw_aclresult.WriteLine(info);
+                swTempAclResult.WriteLine(info);
             }
         }
 
@@ -37,27 +38,75 @@ namespace adaclscan
 
         static void Main(string[] args)
         {
-            if (args.Length != 4)
+            string filterCanbe = "user|group|ou|computer|policy|all|admin";
+            if (args.Length != 4 && args.Length != 5)
             {
-                Console.WriteLine("adaclscan.exe DomainController Domain username password");
+                Console.WriteLine(string.Format("adaclscan.exe DomainController Domain username password [{0}]", filterCanbe));
+                Console.WriteLine("adaclscan.exe DomainController Domain username password [ldap filter]");
+                Console.WriteLine("  filter syntax: https://social.technet.microsoft.com/wiki/contents/articles/5392.active-directory-ldap-syntax-filters.aspx");
+                Console.WriteLine("  get all   sid: dsquery * -limit 0 -attr objectsid distinguishedName");
                 return;
             }
             String DomainController = args[0];
             String Domain = args[1];
             String username = args[2]; //域用户名
-            String password = args[3]; //域用户密码  
+            String password = args[3]; //域用户密码
+
+            string myfilter = "(";
+            if (args.Length == 5)
+            {
+                if (args[4] == "user")
+                {
+                    myfilter += "(&((&(objectCategory=person)(objectClass=user)))(!(userAccountControl:1.2.840.113556.1.4.803:=2)))";
+                }
+                else if (args[4] == "group")
+                {
+                    myfilter += "((objectCategory=group))";
+                }
+                else if (args[4] == "ou")
+                {
+                    myfilter += "((objectCategory=organizationalUnit))";
+                }
+                else if (args[4] == "computer")
+                {
+                    myfilter += "((objectCategory=computer))";
+                }
+                else if (args[4] == "policy")
+                {
+                    myfilter += "(|(objectCategory=groupPolicyContainer)(objectClass=trustedDomain))";
+                }
+                else if (args[4] == "admin")
+                {
+                    myfilter += "(admincount=1)";
+                }
+            }
+            if (args.Length == 4 || (args.Length == 5 && args[4] == "all"))
+            {
+                myfilter += "(objectCategory=*)";
+            }
+            myfilter += ")";
+            if (args.Length == 5 && !filterCanbe.Split('|').Contains(args[4]))
+            {
+                Console.WriteLine("your cusom filter: " + args[4]); 
+                myfilter = "(" + args[4] + ")";
+            }
+
             Simulation.Run(Domain, username, password, () =>
             {
-                string myfilter = "(|";
-                myfilter += "(objectclass=organizationalunit)(objectclass=user)(objectclass=person)(objectclass=computer)(objectclass=group)(objectclass=organizationalPerson)(objectClass=trustedDomain)";
-                myfilter += "(objectCategory=groupPolicyContainer)(objectCategory=computer)(objectCategory=group)(objectCategory=organizationalUnit)(objectCategory=person)";
-                myfilter += ")";
+                int countObject = 0;
+                
                 DirectorySearcher searcher = Ldapcoon.getSearch(Domain, DomainController, false, false);
                 SearchResultCollection result = Ldapcoon.LdapSearchAll(myfilter);
                 StreamWriter sw_sidmap = new StreamWriter("map_sid_dn.txt");
-                sw_aclresult = new StreamWriter(string.Format("acl_result_{0}.txt", ConvertDateTimeToInt(DateTime.Now)));
+                tempResultPath = string.Format("acl_result_temp_{0}.txt", ConvertDateTimeToInt(DateTime.Now));
+                swTempAclResult = new StreamWriter(tempResultPath);
                 foreach (SearchResult r in result)
                 {
+                    countObject += 1;
+                    if (countObject % 1000 == 0)
+                    {
+                        Console.WriteLine(string.Format("Get Object Count: {0}", countObject));
+                    }
                     string sid = "";
                     string distinguishedName = "";
                     string adspath = "";
@@ -86,20 +135,97 @@ namespace adaclscan
                         var sdbytes = (byte[])r.Properties["ntsecuritydescriptor"][0];
                         ActiveDirectorySecurity sd = new ActiveDirectorySecurity();
                         sd.SetSecurityDescriptorBinaryForm(sdbytes);
-                        mapDN_Sd[distinguishedName] = sd;
+
+                        //直接再内存中处理，可能内存太大导致崩溃
+                        //改为先输出到文件，最后都从文件来构造
+                        WriteLog(distinguishedName);
+                        PrintAllowPermissions(sd);
+                        WriteLog("");
+                        
                     }
                 }
+                Console.WriteLine(string.Format("Get Object Count: {0}", countObject));
+
                 sw_sidmap.Close();
-                //通过映射取输出
-                foreach (KeyValuePair<string, ActiveDirectorySecurity> kv in mapDN_Sd)
+                swTempAclResult.Close();
+                swTempAclResult = null;
+
+                //从文件中再读取出来，组装结果
+                string newResultPath = string.Format("acl_result_{0}.txt", ConvertDateTimeToInt(DateTime.Now));
+                StreamWriter swNewResult = new StreamWriter(newResultPath);
+
+                using (FileStream fs = File.Open(tempResultPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (BufferedStream bs = new BufferedStream(fs))
+                using (StreamReader sr = new StreamReader(bs))
                 {
-                    WriteLog(kv.Key);
-                    PrintAllowPermissions(kv.Value);
-                    WriteLog("");
+                    string line;
+                    List<string> templines = new List<string>();
+                    while ((line = sr.ReadLine()) != null)
+                    {
+                        //新的对象
+                        if (line.Length > 1 && line[0] != ' ')
+                        {
+                            if (templines.Count() >= 2)
+                            {
+                                templines.ForEach(swNewResult.WriteLine);
+                            }
+                            templines.Clear();
+                            swNewResult.WriteLine(line);
+                            continue;
+                        }
+                        //新的权限
+                        if (line.Contains(":"))
+                        {
+                            //有数据才打印
+                            if (templines.Count() >= 2) {
+                                templines.ForEach(swNewResult.WriteLine);
+                            }
+                            templines.Clear();
+                            if (line.Contains(":"))
+                            {
+                                templines.Add(line);
+                            }                            
+                        }
+                        if (line.StartsWith("    S-1-5-21"))
+                        {
+                            string sid = line.Replace(" ", "");
+                            string tempdn = GetUserSidString(sid);
+                            if (tempdn.StartsWith("CN=Domain Admins,CN=Users,") ||
+                                tempdn.StartsWith("CN=Administrators,CN=Builtin,") ||
+                                tempdn.StartsWith("CN=Enterprise Admins,CN=Users,") ||
+                                tempdn.StartsWith("CN=Enterprise Key Admins,CN=Users,") ||
+                                tempdn.StartsWith("CN=Key Admins,CN=Users,") ||
+                                tempdn.StartsWith("CN=Exchange Servers,OU=Microsoft Exchange Security Groups,") ||
+                                tempdn.StartsWith("CN=Exchange Trusted Subsystem,OU=Microsoft Exchange Security Groups,") ||
+                                tempdn.StartsWith("CN=Exchange Windows Permissions,OU=Microsoft Exchange Security Groups,") ||
+                                tempdn.StartsWith("CN=Organization Management,OU=Microsoft Exchange Security Groups,") ||
+                                tempdn.StartsWith("CN=Terminal Server License Servers,CN=Builtin,") ||
+                                //可以关注这2个特殊的组
+                                tempdn.StartsWith("CN=Account Operators,CN=Builtin,") ||
+                                tempdn.StartsWith("CN=Cert Publishers,CN=Users,")
+                                )
+                            {
+                                continue;
+                            }
+                            templines.Add("    " + tempdn);
+                            //swNewResult.WriteLine("    "+tempdn);
+                        }
+                        else if (line.StartsWith("    "))
+                        {
+                            templines.Add(line);
+                            //swNewResult.WriteLine(line);
+                        }
+                    }
+                    //输出最后剩余的信息
+                    if (templines.Count() >= 2)
+                    {
+                        templines.ForEach(swNewResult.WriteLine);
+                    }
+                    templines.Clear();
                 }
-                sw_sidmap.Close();
-                sw_aclresult.Close();
-                sw_aclresult = null;
+                swNewResult.Close();
+                //删除临时的文件
+                File.Delete(tempResultPath);
             });
 
         }
@@ -121,6 +247,8 @@ namespace adaclscan
             var writeDaclPrincipals = new HashSet<string>();
             var writePropertyPrincipals = new HashSet<string>();
             var genericWritePrincipals = new HashSet<string>();
+            var dcSyncPrincipals1 = new HashSet<string>();      
+            var dcSyncPrincipals2 = new HashSet<string>();
 
             var rules = sd.GetAccessRules(true, true, typeof(SecurityIdentifier));
             foreach (ActiveDirectoryAccessRule rule in rules)
@@ -130,10 +258,12 @@ namespace adaclscan
                     continue;
                 }
                 var sid = rule.IdentityReference.ToString();
-                if (sid.Split('-').Length <= 4)
+                if (sid.Split('-').Length <= 5)
                 {
                     continue;
                 }
+                string guid = rule.ObjectType.ToString();
+                
                 string tempdn = GetUserSidString(sid);
                 if (tempdn.StartsWith("CN=Domain Admins,CN=Users,") ||
                     tempdn.StartsWith("CN=Administrators,CN=Builtin,") ||
@@ -152,6 +282,15 @@ namespace adaclscan
                 {
                     continue;
                 }
+                if (guid.ToLower() == "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2")
+                {
+                    dcSyncPrincipals1.Add(tempdn);
+                }
+                if (guid.ToLower() == "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2")
+                {
+                    dcSyncPrincipals2.Add(tempdn);
+                }
+
                 if ((rule.ActiveDirectoryRights & ActiveDirectoryRights.ExtendedRight) == ActiveDirectoryRights.ExtendedRight)
                 {
                     allExtendedRightsPrincipals.Add(tempdn);
@@ -201,7 +340,7 @@ namespace adaclscan
 
             if (fullControlPrincipals.Count > 0)
             {
-                WriteLog("  GenericAll Principals    :");
+                WriteLog("  GenericAll:");
                 fullControlPrincipals.OrderBy(p => p).ToList().ForEach(p => {
                     WriteLog("    " + p);
                 });
@@ -209,7 +348,7 @@ namespace adaclscan
 
             if (writeOwnerPrincipals.Count > 0)
             {
-                WriteLog("  WriteOwner Principals    :");
+                WriteLog("  WriteOwner:");
                 writeOwnerPrincipals.OrderBy(p => p).ToList().ForEach(p => {
                     WriteLog("    " + p);
                 });
@@ -217,7 +356,7 @@ namespace adaclscan
 
             if (writeDaclPrincipals.Count > 0)
             {
-                WriteLog("  WriteDacl Principals     :");
+                WriteLog("  WriteDacl:");
                 writeDaclPrincipals.OrderBy(p => p).ToList().ForEach(p => {
                     WriteLog("    " + p);
                 });
@@ -225,20 +364,29 @@ namespace adaclscan
 
             if (writePropertyPrincipals.Count > 0)
             {
-                WriteLog("  WriteProperty Principals :");
+                WriteLog("  WriteProperty:");
                 writePropertyPrincipals.OrderBy(p => p).ToList().ForEach(p => {
                     WriteLog("    " + p);
                 });
             }
 
-            if (writePropertyPrincipals.Count > 0)
+            if (genericWritePrincipals.Count > 0)
             {
-                WriteLog("  GenericWrite Principals  :");
-                writePropertyPrincipals.OrderBy(p => p).ToList().ForEach(p => {
+                WriteLog("  GenericWrite:");
+                genericWritePrincipals.OrderBy(p => p).ToList().ForEach(p => {
                     WriteLog("    " + p);
                 });
             }
 
+            //求交集
+            dcSyncPrincipals1.IntersectWith(dcSyncPrincipals2);
+            if (dcSyncPrincipals1.Count > 0)
+            {
+                WriteLog("  Dcsync:");
+                dcSyncPrincipals1.OrderBy(p => p).ToList().ForEach(p => {
+                    WriteLog("    " + p);
+                });
+            }
         }
 
 

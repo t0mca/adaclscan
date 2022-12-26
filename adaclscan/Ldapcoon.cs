@@ -28,7 +28,7 @@ namespace adaclscan
         {
             DirectoryEntry entry = getDirectoryEntry(Domain, DC, Ldaps, Kerberos);
             DirectorySearcher search = new DirectorySearcher(entry);
-            search.SecurityMasks = SecurityMasks.Dacl | SecurityMasks.Owner;
+            search.SecurityMasks = SecurityMasks.Dacl;// | SecurityMasks.Owner;
             return search;
         }
 
@@ -76,7 +76,7 @@ namespace adaclscan
             {
                 searcher.PropertiesToLoad.Add(ptl);
             }            
-            searcher.PageSize = 100000;
+            searcher.PageSize = 1000;
             searcher.Filter = filter;
             return searcher.FindAll();
         }
@@ -98,7 +98,7 @@ namespace adaclscan
                 searcher.PropertiesToLoad.Add(ptl);
             }
             searcher.SizeLimit = sizeLimit;
-            searcher.PageSize = 100;
+            searcher.PageSize = 1000;
             searcher.Filter = filter;
             return searcher.FindOne();
 
